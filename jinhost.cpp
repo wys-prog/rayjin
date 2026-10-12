@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+namespace fs = std::filesystem;
+
 namespace jin::host {
   class dll {
     void* handle = nullptr;
@@ -79,9 +81,23 @@ namespace jin::host {
   bool loadlib (const jctxptr& ctx, const std::string& path) {
     if (!ctx) return false;
 
+    if (fs::is_directory(path)) {
+      for (const auto &it: fs::directory_iterator(path)) {
+        if (it.is_regular_file()) {
+          auto extension = it.path().extension();
+          if (extension == ".dll" || extension == ".dylib" || extension == ".so") {
+            loadlib(ctx, it.path().lexically_normal().string());
+          }
+        }
+      }
+
+      return true;
+    }
+
     auto lib = std::make_unique<dll>(path);
     if (!*lib) return false;
 
+    std::cout << "<rayjin.Ctx.loadlib>: loaded library '" << path << "'" << std::endl;
     ctx->dlls.push_back(std::move(lib));
     return true;
   }

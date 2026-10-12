@@ -4,6 +4,7 @@
 #include <limits>
 #include <climits>
 #include <type_traits>
+#include <algorithm>
 
 #include "jincore.hpp"
 
@@ -29,7 +30,7 @@ namespace jin::sized {
   #endif
 
   template <typename T>
-  using integral_storage_t = std::make_unsigned_t<integral_storage<sizeof(T)>::type>;
+  using integral_storage_t = typename std::make_unsigned_t<typename integral_storage<sizeof(T)>::type>;
 
   using float64 = std::conditional_t<sizeof(float) == sizeof(int64_t), float, std::conditional_t<
     sizeof(double) == sizeof(int64_t), double, 
@@ -67,6 +68,9 @@ namespace jin::sized {
   namespace arches {
     using vclassic = rt::v_varch<16, uint16_t, float32, integral_storage_t<float32>>;
     using vnormal  = rt::v_varch<32, uint64_t, float64, integral_storage_t<float64>>;
+
+    #ifndef RAYJIN_DISABLE_VLONG_ARCH
     using vlong    = rt::v_varch<32, largeint, largefloat, integral_storage_t<largefloat>>;
+    #endif
   }
 }

@@ -16,6 +16,7 @@
 
 #include "jinhost.hpp"
 #include "jincore.hpp"
+#include "jinstdarches.hpp"
 
 namespace fs = std::filesystem;
 
@@ -32,11 +33,13 @@ namespace jin::rt {
       auto vnew = [](void) -> std::shared_ptr<jin::rt::v_varch_base> {
         return std::make_shared<v>();
       };
-      return {name, vnew};
+      return {name, {.vnew = vnew}};
     }
 
     thread_local std::unordered_map<std::string, varch_symbol> builtin_arches{
-      
+      mk_arch<16, uint16_t, sized::float32, sized::integral_storage_t<sized::float32>>(),
+      mk_arch<32, uint64_t, sized::float64, sized::integral_storage_t<sized::float64>>(),
+      mk_arch<32, sized::largeint, sized::largefloat, sized::integral_storage_t<sized::largefloat>>(),
     };
 
     static constexpr uint32_t V_DISK_MAGIC = 0x5241594A;
@@ -130,7 +133,7 @@ namespace jin::rt {
 
       std::vector<uint8_t> buff{std::istreambuf_iterator<char>(disk), std::istreambuf_iterator<char>()};
       buff.shrink_to_fit();
-      
+
       if (! canloadarch(header)) {
         std::cerr << file << ": no such arch found for this file!" << std::endl;
         throw std::runtime_error("cannot run");
@@ -152,6 +155,7 @@ namespace config {
   static auto jirun = jin::host::newjin();
   static std::vector<std::unique_ptr<std::thread>> global_run_threadpool{};
   using taskfunc = std::function<void(std::shared_ptr<jin::rt::v_varch_base> arch)>;
+  // todo: -Xmem? ou -Xmem-max?
 
   static taskfunc task = [](auto arch) -> void {
     arch->run();
@@ -159,23 +163,30 @@ namespace config {
 }
 
 static std::unordered_map<std::string, std::function<void(std::vector<std::string>&, size_t&)>> arghandler {
-  {"--servering", [](auto& vec, auto& pos) { 
+  {"--servering", [](auto&, auto&) { 
     config::task = [&](std::shared_ptr<jin::rt::v_varch_base> arch) -> void {
       config::global_run_threadpool.push_back(std::make_unique<std::thread>([arch = arch]() { 
         arch->run(); 
       }));
     };
   }},
-  {"--debug-server", [](auto& vec, auto& pos) { config::debug_server = true; }},
+  {"--debug-server", [](auto&, auto&) { config::debug_server = true; }}, // + Visual VM?
   {"--nlib", [](auto& vec, auto& pos) { 
     if (pos + 1 >= vec.size()) std::cerr << "expected native library path after argument '--nlib'!" << std::endl;
     else jin::host::loadlib(config::jirun, vec[++pos]);
   }},
+  {"--arches", [](auto&, auto&) {
+    for (const auto&a: jin::rt::app::builtin_arches) {
+      std::cout << a.first << std::endl;
+    }
+  }}
 };
 
 int main(int argc, char** argv) {
+  std::cout << "<rayjin>" << std::endl;
+
   std::vector<std::string> args(argv + 1, argv + argc);
-  fs::path pbin = argv[0];
+  fs::path pbin = fs::path(argv[0]).parent_path();
   fs::path ppwd = fs::current_path();
   
   jin::host::loadlib(config::jirun, pbin.string());
@@ -200,6 +211,7 @@ int main(int argc, char** argv) {
   }
 
   while (! runstack.empty()) {
+    std::cout << "<rayjin.runStack>: launching task at " << runstack.top().get() << std::endl;
     config::task(runstack.top());
     runstack.pop();
   }
@@ -208,6 +220,7 @@ int main(int argc, char** argv) {
     std::erase_if(config::global_run_threadpool, [](std::unique_ptr<std::thread>& thread) {
       if (thread->joinable()) {
         thread->join();
+        std::cout << "<rayjin.globalRunThreadPool>: joined thread " << thread.get() << std::endl;
         return true;
       }
 
