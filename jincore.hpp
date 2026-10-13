@@ -14,6 +14,9 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <iomanip>
+#include <sstream>
+#include <algorithm>
 
 #include "jinhost.hpp"
 
@@ -75,12 +78,14 @@ namespace jin::rt {
     TESTSM,
     DTCU,
     LOAD,
+    READ,
     WRITE,
     MOV,
     MOVX,
     SWAP,
     DTSM,
     SMLOAD,
+    SMREAD,
     SMWRITE,
     SMMOV,
     SMMOVX,
@@ -106,8 +111,8 @@ namespace jin::rt {
     PANIC,
     BEEP
   };
-
-  inline static const char* opcodes_string[] = {
+  
+  inline static const char* opcodes_string[] {
     "NOP",
     "CUOP",
     "ADD",
@@ -138,12 +143,14 @@ namespace jin::rt {
     "TESTSM",
     "DTCU",
     "LOAD",
+    "READ",
     "WRITE",
     "MOV",
     "MOVX",
     "SWAP",
     "DTSM",
     "SMLOAD",
+    "SMREAD",
     "SMWRITE",
     "SMMOV",
     "SMMOVX",
@@ -167,7 +174,7 @@ namespace jin::rt {
     "SYS",
     "HALT",
     "PANIC",
-    "BEE",
+    "BEEP"
   };
 
   template <typename T> static void write_le(uint8_t *dst, T value) {
@@ -234,8 +241,6 @@ namespace jin::rt {
         panic(th, "segmentation fault", th.ip);
         return -1;
       }
-
-      std::cout << "fetching! " << th.ip << std::endl;
 
       return th.pmem[th.ip++];
     }
@@ -414,7 +419,7 @@ namespace jin::rt {
           th.flag = (th.simd[vreg(fetch(th))] == 0) ? FLAG_ZERO : FLAG_NONE;
           break;
         case ORG:
-          org = th.cu[vreg(fetch(th))];
+          org = th.cu[vreg(fetch(th))]; 
           break;
         case JMP:
           jump(th, th.cu[vreg(fetch(th))]);
@@ -496,15 +501,22 @@ namespace jin::rt {
           break;
         }
         case LOAD: {
-          auto adr = th.cu[vreg(fetch(th))] - org;
+          auto& dst = th.cu[vreg(fetch(th))];
+          auto value = read_le<vcu>(th.pmem + th.ip);
+          th.ip += sizeof(vcu);
+          dst = value;
+        } break;
+        case READ: {
           auto &dst = th.cu[vreg(fetch(th))];
-
+          auto adr = th.cu[vreg(fetch(th))] - org;
+  
           if (adr >= th.pzdata) {
             panic(th, "segmentation fault", adr);
             return false;
           }
-
+  
           dst = read_le<vcu>(th.pmem + adr);
+          th.ip += sizeof(vcu);
         } break;
         case WRITE: {
           auto adr = th.cu[vreg(fetch(th))] - org;
@@ -536,15 +548,23 @@ namespace jin::rt {
           src = buff;
         } break;
         case SMLOAD: {
+          auto value = read_le<vsimdintegral>(th.pmem+th.ip);
+          th.ip += sizeof(vcu);
+          auto& dst = th.simd[vreg(fetch(th))];
+
+          dst = *((vsimd*)&value);
+        } break;
+        case SMREAD: {
           auto adr = th.cu[vreg(fetch(th))] - org;
           auto &dst = th.simd[vreg(fetch(th))];
-
+  
           if (adr >= th.pzdata) {
             panic(th, "segmentation fault", adr);
             return false;
           }
-
+  
           auto buff = read_le<vsimdintegral>(th.pmem + adr);
+          th.ip += sizeof(vcu);
           dst = *((vsimd *)&buff);
         } break;
         case SMWRITE: {
@@ -657,6 +677,138 @@ namespace jin::rt {
       }
     }
 
+    static size_t instruction_size(
+      uint8_t opcode,
+      size_t remaining
+    ) {
+      size_t size = 1;
+
+      switch (opcode) {
+        case NOP:
+        case HALT:
+        case BEEP: break;
+
+        case TESTCU:
+        case TESTSM:
+        case ORG:
+        case JMP:
+        case JZ:
+        case JNZ:
+        case JQ:
+        case JNQ:
+        case JG:
+        case JL:
+        case JGQ:
+        case JLQ:
+        case PANIC: size += 1; break;
+
+        case ADD:
+        case SUB:
+        case MUL:
+        case DIV:
+        case MOD:
+        case SMADD:
+        case SMSUB:
+        case SMMUL:
+        case SMDIV:
+        case SMMOD:
+        case CMPCU:
+        case CMPSM:
+        case OR:
+        case XOR:
+        case AND:
+        case NAND:
+        case SHR:
+        case SHL:
+        case MOV:
+        case MOVX:
+        case SWAP:
+        case READ:
+        case WRITE:
+        case SMMOV:
+        case SMMOVX:
+        case SMSWAP: size += 2; break;
+
+        case LOAD: size += 1 + sizeof(vcu); break;
+        case SMLOAD: size += 1 + sizeof(vsimd); break;
+
+        default: break;
+      }
+
+      return size <= remaining ? size : remaining;
+    }
+
+    static constexpr const char* reset   = "\033[0m";
+    static constexpr const char* dim     = "\033[2m";
+    static constexpr const char* bold    = "\033[1m";
+    static constexpr const char* cyan    = "\033[38;2;105;200;220m";
+    static constexpr const char* purple  = "\033[38;2;195;155;255m";
+    static constexpr const char* gold    = "\033[38;2;235;190;120m";
+    static constexpr const char* red     = "\033[38;2;255;115;115m";
+    static constexpr const char* white   = "\033[38;2;220;225;235m";
+
+    std::string dump_memory_segment(const uint8_t* p, size_t len, size_t opcount, size_t ip) {
+      std::ostringstream out;
+
+      const size_t address_width = std::max<size_t>(
+        4, std::to_string(len ? len - 1 : 0).size()
+      );
+
+      size_t offset = 0;
+      size_t count = 0;
+
+      while (offset < len && count < opcount) {
+        const uint8_t opcode = p[offset];
+
+        size_t size = instruction_size(opcode, len - offset);
+
+        if (size == 0) size = 1;
+
+        size = std::min(size, len - offset);
+
+        const bool has_ip = ip >= offset && ip < offset + size;
+        out << (has_ip ? std::string(cyan) + bold + " > " : "   ");
+        out << cyan << "0x" << std::hex << std::uppercase  << std::setw(static_cast<int>(address_width)) 
+            << std::setfill('0') << offset << reset;
+
+        out << "  ";
+
+        for (size_t j = 0; j < size; ++j) {
+          if (j == 0) {
+            out << purple << bold;
+          } else {
+            out << gold;
+          }
+
+          out << std::setw(2) << std::setfill('0') << static_cast<unsigned>(p[offset + j]) << reset << ' ';
+        }
+
+        if (size < 8) out << std::string((8 - size) * 3, ' ');
+
+        out << " ";
+
+        if (opcode < std::size(opcodes_string)) {
+          out << white << bold
+              << opcodes_string[opcode] << reset;
+        } else {
+          out << red << bold << ".byte " << reset
+              << purple << "0x" << std::setw(2)
+              << static_cast<unsigned>(opcode) << reset;
+        }
+
+        if (has_ip) out << "  " << cyan << "<-- ip" << reset;
+        
+        out << '\n';
+        offset += size;
+        ++count;
+      }
+
+      if (ip == len)  out << dim << "  (ip at end of segment)" << reset << '\n';
+      
+
+      return out.str();
+    }
+
     void watcher_thread_update(void) {
       std::cout << "<rayjin.watcherThread>: a watcher was initialized" << std::endl;
       bool even = false;
@@ -671,8 +823,9 @@ namespace jin::rt {
           << std::endl;
           panicstruct *pan = current_panic.load();
           std::cerr << std::format(
-            "on sub-vthread {} relative to thread {}, '{}' ({})\n",
-            pan->thread.id, virtual_id.load(), pan->message, pan->userdatum
+            "on sub-vthread {} relative to thread {}, '{}' ({})\nmemory dump:\n{}\n",
+            pan->thread.id, virtual_id.load(), pan->message, pan->userdatum, 
+            dump_memory_segment(pan->thread.pmem, pan->thread.lmem, 8, pan->thread.ip)
           );
           
           finish_threadpool();
@@ -730,7 +883,14 @@ namespace jin::rt {
         .funcs = funcs,
       };
 
-      data.thread.id = thread_ids.fetch_add(1);
+      data.thread->id = thread_ids.fetch_add(1);
+      data.thread->pmem = memory.data() + pstart;
+      data.thread->lmem = size;
+      data.thread->lvclib = data.funcs.size();
+      data.thread->vclib = data.funcs.data();
+      /** threads never free their region  */
+      /** why the fuck threads execute random memory pages? */
+      /** memory pages should be empty!!  */
       std::pair<std::thread, vthreaddata> v_elem;
       v_elem.second = data;
       v_elem.first = vspawn(data->thread);
@@ -743,23 +903,19 @@ namespace jin::rt {
     void load(std::vector<uint8_t> mem, std::vector<void*> funcs) override {
       mainvth.vclib = (vcfun*)funcs.data();
       memory = std::vector<uint8_t>{mem.begin(), mem.end()};
-      // std::cout << __func__ << ": " << &memory << " " << (void*)memory.data() << std::endl;
     }
 
     void run() override {
       vthread mainth{};
       mainth.vclib = shared_vclib.data();
-      // std::cout << __func__ << ": " << &memory << " " << (void*)memory.data() << std::endl;
-
-      for (size_t i = 0; i < mainth.lmem; i++) {
-        std::cout << (int)mainth.pmem[i] << '-' << std::flush;
-      }
 
       vmemmap.push_back({
         0,
         1024
       });
+
       mainth.lmem = 1024;
+      mainth.pmem = memory.data();
 
       watcherthead = std::thread{[this]() -> void { this->watcher_thread_update(); }};
       vloop(mainth);
