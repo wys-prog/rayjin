@@ -621,6 +621,17 @@ namespace jin::rt {
         auto opcode = fetch(th);
         if (! vdo(th, opcode)) break;
       }
+
+      std::lock_guard<std::mutex> lock1{memory_mtx};
+
+      size_t i{0};
+      for (const auto&[pstart, len]: vmemmap) {
+        i++;
+        if ((uintptr_t)th.pmem == pstart) break;
+      }
+
+      vmemmap.erase(vmemmap.begin() + i);
+      throw std::runtime_error("todo: where do we read from disk file ? +disk file? + gimme adress plizzz!");
     }
 
     std::thread vspawn(std::shared_ptr<vthread> vth) {
