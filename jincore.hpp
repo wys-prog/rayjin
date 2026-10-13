@@ -231,7 +231,7 @@ namespace jin::rt {
 
     uint8_t fetch(vthread& th) { /* FUCKING REF. */
       if (th.ip + 1 > th.lmem) { /* reading out of bounds! */
-        panic(th, "reading out of bounds!", th.ip);
+        panic(th, "segmentation fault", th.ip);
         return -1;
       }
 
@@ -641,7 +641,6 @@ namespace jin::rt {
 
     inline void panic (vthread &th, const char *msg, vcu udatum) {
       std::this_thread::sleep_for(std::chrono::milliseconds(590));
-      std::cout << "<rayjin.panic> a panic attack was simulated" << std::endl;
       panicstruct *pan = new panicstruct({.message = msg, .thread = th, .userdatum = udatum});
 
       current_panic.store(pan);
@@ -717,13 +716,18 @@ namespace jin::rt {
       if (!found) {
         vth->cu[0] = 0;
         return;
+      } else {
+        /* Otherwise, ima reserve the region */
+        vmemmap.push_back({
+          pstart, size
+        });
       }
 
       std::lock_guard<std::mutex> lock2(shared_vclib_mtx);
       std::vector<vcfun> funcs = shared_vclib;
       vthreaddata data{
-          .thread = std::make_shared<vthread>(child),
-          .funcs = funcs,
+        .thread = std::make_shared<vthread>(child),
+        .funcs = funcs,
       };
 
       data.thread.id = thread_ids.fetch_add(1);
@@ -736,20 +740,26 @@ namespace jin::rt {
       vth->cu[0] = 1;
     }
 
-    void load(std::vector<uint8_t> mem, std::vector<void *> funcs) override {
+    void load(std::vector<uint8_t> mem, std::vector<void*> funcs) override {
       mainvth.vclib = (vcfun*)funcs.data();
       memory = std::vector<uint8_t>{mem.begin(), mem.end()};
-      std::cout << "at load, " << memory.size() << std::endl;
+      // std::cout << __func__ << ": " << &memory << " " << (void*)memory.data() << std::endl;
     }
 
     void run() override {
       vthread mainth{};
       mainth.vclib = shared_vclib.data();
-      std::cout << mainth.lmem << " memory!" << std::endl;
+      // std::cout << __func__ << ": " << &memory << " " << (void*)memory.data() << std::endl;
+
       for (size_t i = 0; i < mainth.lmem; i++) {
         std::cout << (int)mainth.pmem[i] << '-' << std::flush;
       }
-      
+
+      vmemmap.push_back({
+        0,
+        1024
+      });
+      mainth.lmem = 1024;
 
       watcherthead = std::thread{[this]() -> void { this->watcher_thread_update(); }};
       vloop(mainth);
