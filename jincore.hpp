@@ -22,7 +22,7 @@
 
 namespace fs = std::filesystem;
 
-std::ostream& operator<<(std::ostream& os, __uint128_t n) {
+inline std::ostream& operator<<(std::ostream& os, __uint128_t n) {
   char buf[40];
   int i = 0;
 
@@ -36,17 +36,19 @@ std::ostream& operator<<(std::ostream& os, __uint128_t n) {
   return os;
 }
 
-std::ostream& operator<<(std::ostream& os, __int128_t n) {
+inline std::ostream& operator<<(std::ostream& os, __int128_t n) {
   if (n < 0) {
    os.put('-');
-   __uint128_t u = -(__uint128_t)n;
+   __uint128_t u = -static_cast<__uint128_t>(n);
    return os << u;
   }
 
-  return os << (__uint128_t)n;
+  return os << static_cast<__uint128_t>(n);
 }
 
 namespace jin::rt {
+  extern std::mutex stdcppwrite_global_mutex;
+
   enum opcodes : uint8_t {
     NOP,
     CUOP,
@@ -603,9 +605,11 @@ namespace jin::rt {
         case PANIC:
           panic(th, "user panic!", th.cu[vreg(fetch(th))]);
           return false;
-        case BEEP:
+        case BEEP: {
+          std::lock_guard<std::mutex> lock1{stdcppwrite_global_mutex};
           std::cout << "<rayjin.vm.VThread@" << th.id << ": <beep>" << std::endl;
           break;
+        }
         default:
           panic(th, "illegal opcode", opc);
           return false;
@@ -615,22 +619,19 @@ namespace jin::rt {
     }
 
     void vloop(vthread &th) {
-      while (! watcher_init.load()) std::this_thread::sleep_for(std::chrono::nanoseconds(100));
+      while (! watcher_init.load()) std::this_thread::sleep_for(std::chrono::nanoseconds(1000));
+      std::cout << "<rayjin.vloop>: thread " << th.id << " is starting!" << std::endl;
 
       while (th.flag != FLAG_STOP) {
         auto opcode = fetch(th);
         if (! vdo(th, opcode)) break;
       }
 
+      main_exiting.store(true);
+      watcherthead.join();
+
       std::lock_guard<std::mutex> lock1{memory_mtx};
-
-      size_t i{0};
-      for (const auto&[pstart, len]: vmemmap) {
-        i++;
-        if ((uintptr_t)th.pmem == pstart) break;
-      }
-
-      vmemmap.erase(vmemmap.begin() + i);
+      std::erase_if(vmemmap, [&](auto p) { return (uintptr_t)th.pmem == p.first; });
       throw std::runtime_error("todo: where do we read from disk file ? +disk file? + gimme adress plizzz!");
     }
 
@@ -674,6 +675,9 @@ namespace jin::rt {
       std::this_thread::sleep_for(std::chrono::milliseconds(590));
       panicstruct *pan = new panicstruct({.message = msg, .thread = th, .userdatum = udatum});
 
+      /** rollback! */
+      pan->thread.ip -= sizeof(vcu);
+
       current_panic.store(pan);
       panicking.store(true);
     }
@@ -692,7 +696,7 @@ namespace jin::rt {
       uint8_t opcode,
       size_t remaining
     ) {
-      size_t size = 1;
+      size_t size = 0;
 
       switch (opcode) {
         case NOP:
@@ -758,65 +762,48 @@ namespace jin::rt {
     static constexpr const char* red     = "\033[38;2;255;115;115m";
     static constexpr const char* white   = "\033[38;2;220;225;235m";
 
-    std::string dump_memory_segment(const uint8_t* p, size_t len, size_t opcount, size_t ip) {
-      std::ostringstream out;
+    static std::string dump (const uint8_t* p, size_t len, size_t& read, const char* rest) {
+      std::ostringstream oss{""};
+      oss << " ";
+      if (p[0] < std::size(opcodes_string)) {
+        oss << std::hex << cyan << (unsigned)p[0] << std::setw(2) << std::setfill('0')
+            << "  " << red << std::setw(8) << std::setfill(' ') << opcodes_string[p[0]] << rest << " ";
+        auto rem = instruction_size(p[0], len);
+        oss << purple;
 
-      const size_t address_width = std::max<size_t>(
-        4, std::to_string(len ? len - 1 : 0).size()
-      );
-
-      size_t offset = 0;
-      size_t count = 0;
-
-      while (offset < len && count < opcount) {
-        const uint8_t opcode = p[offset];
-
-        size_t size = instruction_size(opcode, len - offset);
-
-        if (size == 0) size = 1;
-
-        size = std::min(size, len - offset);
-
-        const bool has_ip = ip >= offset && ip < offset + size;
-        out << (has_ip ? std::string(cyan) + bold + " > " : "   ");
-        out << cyan << "0x" << std::hex << std::uppercase  << std::setw(static_cast<int>(address_width)) 
-            << std::setfill('0') << offset << reset;
-
-        out << "  ";
-
-        for (size_t j = 0; j < size; ++j) {
-          if (j == 0) {
-            out << purple << bold;
-          } else {
-            out << gold;
-          }
-
-          out << std::setw(2) << std::setfill('0') << static_cast<unsigned>(p[offset + j]) << reset << ' ';
+        for (auto i{0ull}; i < rem; i++) {
+          oss << std::hex << (unsigned)p[i] << std::setw(sizeof(vcu)*2) << std::setfill('0') << ", ";
+          read++;
         }
 
-        if (size < 8) out << std::string((8 - size) * 3, ' ');
-
-        out << " ";
-
-        if (opcode < std::size(opcodes_string)) {
-          out << white << bold
-              << opcodes_string[opcode] << reset;
-        } else {
-          out << red << bold << ".byte " << reset
-              << purple << "0x" << std::setw(2)
-              << static_cast<unsigned>(opcode) << reset;
-        }
-
-        if (has_ip) out << "  " << cyan << "<-- ip" << reset;
-        
-        out << '\n';
-        offset += size;
-        ++count;
+        oss << rest << std::endl;
+      } else {
+        oss << std::hex << white << std::setw(sizeof(vcu)*2) << std::setfill('0')
+            << (unsigned)p[0] << rest << std::endl;
       }
 
-      if (ip == len)  out << dim << "  (ip at end of segment)" << reset << '\n';
-      
+      return oss.str();
+    }
 
+    static std::string dump_memory_segment (const uint8_t* p, size_t len, size_t ip) {
+      std::ostringstream out;
+
+      for (auto i{0ull}; i < len; i++) {
+        size_t read{0};
+        std::string rest = reset;
+
+        if (i == ip) {
+          out << bold;
+          rest += bold;
+        }
+
+        out << cyan << std::hex << std::setw(16) << std::setfill('0') 
+            << (size_t)(p + i) << reset << ((i == ip) ? " -> " : "    ")
+            << std::setw(sizeof(vcu)*2) << std::setfill('0') << (size_t)i
+            << dump(p + i, len - 1, read, rest.c_str());
+        i += read;
+      }
+      
       return out.str();
     }
 
@@ -836,7 +823,7 @@ namespace jin::rt {
           std::cerr << std::format(
             "on sub-vthread {} relative to thread {}, '{}' ({})\nmemory dump:\n{}\n",
             pan->thread.id, virtual_id.load(), pan->message, pan->userdatum, 
-            dump_memory_segment(pan->thread.pmem, pan->thread.lmem, 8, pan->thread.ip)
+            dump_memory_segment(pan->thread.pmem, pan->thread.lmem, pan->thread.ip)
           );
           
           finish_threadpool();

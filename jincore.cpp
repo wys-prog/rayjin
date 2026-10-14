@@ -21,6 +21,8 @@
 namespace fs = std::filesystem;
 
 namespace jin::rt {
+  std::mutex stdcppwrite_global_mutex;
+
   namespace app {
     struct varch_symbol {
       std::shared_ptr<jin::rt::v_varch_base> (*vnew)(void);

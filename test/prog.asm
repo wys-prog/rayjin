@@ -14,30 +14,14 @@ header:
   dd 0
 
 boot:
-
 main:
-
   load 0, 12
   load 1, 3
+
   load 4, 64
   load 5, boot
-  
+
   org 4
-
-  cmp 0, 1
-  load 3, greater
-  add 3, 4
-  sub 3, 5
-  jg 3
-
-end:
-  halt
-
-greater:
-  beep
-  jmp 3
-  halt
-
-times 512 halt
+  panic 67
 
 thread2:
