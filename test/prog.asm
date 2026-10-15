@@ -14,14 +14,25 @@ header:
   dd 0
 
 boot:
+  load    0, 64
+  org     0
+
+boot.realloc:
+  load    0, 64
+  load    1, boot
+  sub     0, 1
+
 main:
-  load 0, 12
-  load 1, 3
 
-  load 4, 64
-  load 5, boot
+times 1024 - ($ - boot) db 0
 
-  org 4
-  panic 67
+_Vm.Threads.thread2:
+  load    0, 64
+  org     0
+  load    1, _Vm.Threads.thread2.do
+  load    2, _Vm.Threads.thread2
+  sub     
 
-thread2:
+.do:
+  beep
+  jmp 

@@ -111,7 +111,11 @@ namespace jin::rt {
     SYS,
     HALT,
     PANIC,
-    BEEP
+    BEEP,
+    MOVCUSM,
+    MOVSMCU,
+    CALL,
+    RET,
   };
   
   inline static const char* opcodes_string[] {
@@ -176,7 +180,11 @@ namespace jin::rt {
     "SYS",
     "HALT",
     "PANIC",
-    "BEEP"
+    "BEEP",
+    "MOVCUSM",
+    "MOVSMCU",
+    "CALL",
+    "RET",
   };
 
   template <typename T> static void write_le(uint8_t *dst, T value) {
@@ -198,7 +206,7 @@ namespace jin::rt {
   class v_varch_base {
   public:
     virtual void run() = 0;
-    virtual void load(std::vector<uint8_t> mem, std::vector<void *>) = 0;
+    virtual void load(std::vector<uint8_t>, std::vector<uint8_t>, std::vector<void*>) = 0;
   };
 
   template <auto vregcount, typename vcu, typename vsimd, typename vsimdintegral>
@@ -218,6 +226,7 @@ namespace jin::rt {
     using vcfun_t = vcfun;
 
     struct vthread {
+      std::stack<vcu> callstack;
       uint8_t* pmem{0};
       vcfun* vclib{0};
       vsimd simd[vregcount]{0};
@@ -230,7 +239,7 @@ namespace jin::rt {
       uint8_t flag{0};
     };
 
-    vcu org {32};
+    thread_local vcu org {32};
 
     static std::string name() {
       return "varchc" + std::to_string(vregcount) + "x" +
@@ -610,6 +619,29 @@ namespace jin::rt {
           std::cout << "<rayjin.vm.VThread@" << th.id << ": <beep>" << std::endl;
           break;
         }
+        case MOVCUSM: {
+          auto src = th.cu[vreg(fetch(th))];
+          th.simd[vreg(fetch(th))] = src;
+          break;
+        }
+        case MOVSMCU: {
+          auto src = th.simd[vreg(fetch(th))];
+          th.cu[vreg(fetch(th))] = src;
+          break;
+        }
+        case CALL: {
+          th.callstack.push(th.ip+2);
+          th.ip = th.cu[vreg(fetch(th))];
+          std::cout << "calling " << (unsigned long)th.ip << std::endl;
+          break;
+        }
+        case RET: {
+          if (! th.callstack.empty()) {
+            th.ip = th.callstack.top();
+            th.callstack.pop();
+          } else panic(th, "retourning on an empty callstack!!", th.callstack.size());
+          break;
+        }
         default:
           panic(th, "illegal opcode", opc);
           return false;
@@ -628,11 +660,9 @@ namespace jin::rt {
       }
 
       main_exiting.store(true);
-      watcherthead.join();
 
       std::lock_guard<std::mutex> lock1{memory_mtx};
       std::erase_if(vmemmap, [&](auto p) { return (uintptr_t)th.pmem == p.first; });
-      throw std::runtime_error("todo: where do we read from disk file ? +disk file? + gimme adress plizzz!");
     }
 
     std::thread vspawn(std::shared_ptr<vthread> vth) {
@@ -653,6 +683,9 @@ namespace jin::rt {
     std::vector<uint8_t> memory;
     std::vector<std::pair<vcu, vcu>> vmemmap;
     std::mutex memory_mtx;
+
+    std::vector<uint8_t> disk;
+    std::mutex disk_mtx;
 
     vthread mainvth{};
     std::thread watcherthead;
@@ -839,11 +872,14 @@ namespace jin::rt {
       std::cout << "<rayjin.watcherThread>: a watcher finished its execution" << std::endl;
     }
 
-    void v_vm_spawn_vthread(vthread *vth) {
-      std::lock_guard<std::mutex> lock(memory_mtx);
-      auto size = vth->cu[0];
-      vthread child{};
+    void v_vm_load_vthread_memory (vthread* vth, vcu start, vcu len) {
+      std::lock_guard<std::mutex> lock(disk_mtx);
+      for (vcu i{0}; i < std::min(len, vth->lmem); i++) {
+        vth.pmem[i] = disk[i];
+      }
+    }
 
+    bool v_vm_get_memory_segment (vthread* vth, size_t size) {
       vcu pstart = 0;
       bool found = false;
 
@@ -855,8 +891,7 @@ namespace jin::rt {
         }
 
         /* Move candidate past this allocated segment. */
-        if (segstart + seglen > pstart)
-          pstart = segstart + seglen;
+        if (segstart + seglen > pstart) pstart = segstart + seglen;
       }
 
       /* Check space after the final allocated segment. */
@@ -866,13 +901,32 @@ namespace jin::rt {
 
       if (!found) {
         vth->cu[0] = 0;
-        return;
+        return false;
       } else {
         /* Otherwise, ima reserve the region */
         vmemmap.push_back({
           pstart, size
         });
+
+        vth->pmem = memory.data() + pstart;
+        vth->lmem = size;
+        return true;
       }
+    }
+
+    void v_vm_spawn_vthread (vthread *vth) {
+      std::lock_guard<std::mutex> lock(memory_mtx);
+      auto size = vth->cu[0];
+      auto codestart = vth->cu[1];
+      auto codelen = vth->cu[2];
+      vthread child{};
+
+      if (! v_vm_get_memory_segment(&child, size)) {
+        vth->cu[0] = 0;
+        return;
+      }
+
+      v_vm_load_vthread_memory(&child, codestart, codelen);
 
       std::lock_guard<std::mutex> lock2(shared_vclib_mtx);
       std::vector<vcfun> funcs = shared_vclib;
@@ -882,13 +936,10 @@ namespace jin::rt {
       };
 
       data.thread->id = thread_ids.fetch_add(1);
-      data.thread->pmem = memory.data() + pstart;
       data.thread->lmem = size;
       data.thread->lvclib = data.funcs.size();
       data.thread->vclib = data.funcs.data();
-      /** threads never free their region  */
-      /** why the fuck threads execute random memory pages? */
-      /** memory pages should be empty!!  */
+
       std::pair<std::thread, vthreaddata> v_elem;
       v_elem.second = data;
       v_elem.first = vspawn(data->thread);
@@ -898,23 +949,20 @@ namespace jin::rt {
       vth->cu[0] = 1;
     }
 
-    void load(std::vector<uint8_t> mem, std::vector<void*> funcs) override {
+    void load(std::vector<uint8_t> mem, std::vector<uint8_t> dsk, std::vector<void*> funcs) override {
       mainvth.vclib = (vcfun*)funcs.data();
-      memory = std::vector<uint8_t>{mem.begin(), mem.end()};
+      memory = mem;
+      disk = dsk;
     }
 
     void run() override {
       vthread mainth{};
       mainth.vclib = shared_vclib.data();
 
-      vmemmap.push_back({
-        0,
-        1024
-      });
+      vmemmap.push_back({0, 1024});
 
       mainth.lmem = 1024;
-      mainth.pmem = memory.data();
-
+      mainth.pmem = this->memory.data();
       watcherthead = std::thread{[this]() -> void { this->watcher_thread_update(); }};
       vloop(mainth);
       main_exiting.store(true);

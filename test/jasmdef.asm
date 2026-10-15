@@ -243,3 +243,20 @@
 %endmacro
 
 %define beep  db 61
+
+%macro movcusm 2
+  db 62
+  db %1, %2
+%endmacro
+
+%macro movsmcu 2
+  db 63
+  db %1, %2
+%endmacro
+
+%macro call 1
+  db 64
+  dd %1
+%endmacro
+
+%define ret db 65
